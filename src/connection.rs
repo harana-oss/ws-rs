@@ -88,6 +88,7 @@ where
     events: Ready,
 
     fragments: VecDeque<Frame>,
+    fragments_total_size: usize,
 
     in_buffer: CircularBuffer,
     out_buffer: CircularBuffer,
@@ -121,6 +122,7 @@ where
             endpoint: Endpoint::Server,
             events: Ready::empty(),
             fragments: VecDeque::with_capacity(settings.fragments_capacity),
+            fragments_total_size: 0,
             in_buffer: CircularBuffer::new(
                 settings.in_buffer_capacity,
                 settings.in_buffer_capacity_hard_limit,
@@ -898,18 +900,29 @@ where
                         OpCode::Continue => {
                             trace!("Received final fragment {:?}", frame);
                             if let Some(first) = self.fragments.pop_front() {
-                                let size = self.fragments.iter().fold(
-                                    first.payload().len() + frame.payload().len(),
-                                    |len, frame| len + frame.payload().len(),
+                                let size = self.fragments_total_size + frame.payload().len();
+                                self.fragments_total_size -= first.payload().len();
+
+                                debug_assert_eq!(
+                                    self.fragments_total_size,
+                                    self.fragments.iter().map(|frame| frame.payload().len()).sum()
                                 );
+
+                                if size > self.settings.max_total_fragments_size {
+                                    return Err(Error::new(Kind::Capacity, "Exceeded max total fragments size."));
+                                }
+
                                 match first.opcode() {
                                     OpCode::Text => {
                                         trace!("Constructing text message from fragments: {:?} -> {:?} -> {:?}", first, self.fragments.iter().collect::<Vec<&Frame>>(), frame);
                                         let mut data = Vec::with_capacity(size);
                                         data.extend(first.into_data());
                                         while let Some(frame) = self.fragments.pop_front() {
+                                            self.fragments_total_size -= frame.payload().len();
                                             data.extend(frame.into_data());
                                         }
+
+                                        debug_assert_eq!(self.fragments_total_size, 0);
                                         data.extend(frame.into_data());
 
                                         let string = String::from_utf8(data)
@@ -927,9 +940,11 @@ where
                                         data.extend(first.into_data());
 
                                         while let Some(frame) = self.fragments.pop_front() {
+                                            self.fragments_total_size -= frame.payload().len();
                                             data.extend(frame.into_data());
                                         }
 
+                                        debug_assert_eq!(self.fragments_total_size, 0);
                                         data.extend(frame.into_data());
 
                                         trace!(
@@ -967,7 +982,19 @@ where
                         {
                             return Err(Error::new(Kind::Capacity, "Exceeded max fragments."));
                         } else {
-                            self.fragments.push_back(frame)
+                            if self.fragments_total_size + frame.len() > self.settings.max_total_fragments_size {
+                                return Err(Error::new(Kind::Capacity, "Exceeded max total fragments size."));
+                            }
+
+                            if !frame.is_empty() {
+                                self.fragments_total_size += frame.payload().len();
+                                self.fragments.push_back(frame);
+
+                                debug_assert_eq!(
+                                    self.fragments_total_size,
+                                    self.fragments.iter().map(|frame| frame.payload().len()).sum()
+                                );
+                            }
                         }
                     }
                 }

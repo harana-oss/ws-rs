@@ -611,7 +611,7 @@ where
                         .accept()
                     {
                         Ok((sock, addr)) => {
-                            info!("Accepted a new tcp connection from {}.", addr);
+                            trace!("Accepted a new tcp connection from {}.", addr);
                             if let Err(err) = self.accept(poll, sock) {
                                 error!("Unable to build WebSocket connection {:?}", err);
                                 if self.settings.panic_on_new_connection {
